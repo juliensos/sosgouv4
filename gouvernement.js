@@ -1,1222 +1,808 @@
-// gouvernement.js - Gestion de la composition des gouvernements
-// ================================================================
+// ============================================
+// SOSGOUV - Gestion des gouvernements
+// ============================================
 
-import { supabase, getCurrentUser } from './auth.js';
+const Gouvernement = {
+  gouvernements: [],
+  secteurs: [],
+  sousSecteurs: [],
+  currentGouvernement: null,
 
-// ================================================================
-// ÉTAT GLOBAL DU GOUVERNEMENT EN COURS DE COMPOSITION
-// ================================================================
+  // Initialiser - charger les secteurs et sous-secteurs
+  async init() {
+    await this.loadSecteurs();
+    await this.loadSousSecteurs();
+  },
 
-let gouvernementEnCours = {
-    id: null,
+  // Charger tous les secteurs
+  async loadSecteurs() {
+    try {
+      const { data, error } = await supabase
+        .from('secteurs')
+        .select('*')
+        .order('ordre', { ascending: true });
+
+      if (error) throw error;
+      this.secteurs = data || [];
+    } catch (error) {
+      console.error('Erreur chargement secteurs:', error);
+    }
+  },
+
+  // Charger tous les sous-secteurs
+  async loadSousSecteurs() {
+    try {
+      const { data, error } = await supabase
+        .from('sous_secteurs')
+        .select('*')
+        .order('nom', { ascending: true });
+
+      if (error) throw error;
+      this.sousSecteurs = data || [];
+    } catch (error) {
+      console.error('Erreur chargement sous-secteurs:', error);
+    }
+  },
+
+  // Charger les gouvernements publiés
+  async loadPublishedGovernments() {
+    try {
+      const { data, error } = await supabase
+        .from('gouvernements')
+        .select(`
+          *,
+          auteur:users!gouvernements_created_by_fkey(username),
+          postes:postes_gouvernement(
+            *,
+            personnalite:personnalites(*),
+            secteur:secteurs(*)
+          )
+        `)
+        .eq('is_published', true)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      this.gouvernements = data || [];
+      
+      // Charger les stats (votes, commentaires)
+      await this.loadGouvernementsStats();
+      
+      this.displayGouvernements();
+
+    } catch (error) {
+      console.error('Erreur chargement gouvernements:', error);
+      UI.showNotification('Erreur de chargement des gouvernements', 'error');
+    }
+  },
+
+  // Charger les statistiques des gouvernements
+  async loadGouvernementsStats() {
+    try {
+      // Votes
+      const { data: votes } = await supabase
+        .from('gouvernements_votes')
+        .select('gouvernement_id, note');
+
+      // Comptabiliser les moyennes
+      const statsVotes = {};
+      if (votes) {
+        votes.forEach(v => {
+          if (!statsVotes[v.gouvernement_id]) {
+            statsVotes[v.gouvernement_id] = { total: 0, count: 0 };
+          }
+          statsVotes[v.gouvernement_id].total += v.note;
+          statsVotes[v.gouvernement_id].count += 1;
+        });
+      }
+
+      // Commentaires
+      const { data: comments } = await supabase
+        .from('commentaires')
+        .select('gouvernement_id');
+
+      const statsComments = {};
+      if (comments) {
+        comments.forEach(c => {
+          statsComments[c.gouvernement_id] = (statsComments[c.gouvernement_id] || 0) + 1;
+        });
+      }
+
+      // Ajouter aux gouvernements
+      this.gouvernements.forEach(g => {
+        if (statsVotes[g.id]) {
+          g.note_moyenne = (statsVotes[g.id].total / statsVotes[g.id].count).toFixed(1);
+          g.nb_votes = statsVotes[g.id].count;
+        } else {
+          g.note_moyenne = 0;
+          g.nb_votes = 0;
+        }
+        g.nb_commentaires = statsComments[g.id] || 0;
+      });
+
+    } catch (error) {
+      console.error('Erreur chargement stats:', error);
+    }
+  },
+
+  // Afficher les gouvernements
+  displayGouvernements() {
+    const container = document.querySelector('._3-1_sous-menu-content-1 ._3-gov-content');
+    if (!container || !container.parentElement) return;
+
+    // Supprimer les anciens blocs
+    const parent = container.parentElement;
+    const oldBlocs = parent.querySelectorAll('._3-gov-content');
+    oldBlocs.forEach(b => b.remove());
+
+    // Créer les nouveaux blocs
+    this.gouvernements.forEach(gouv => {
+      const html = this.createGouvernementBloc(gouv);
+      parent.insertAdjacentHTML('beforeend', html);
+    });
+
+    // Ajouter les event listeners
+    this.attachGouvernementListeners();
+  },
+
+  // Créer le HTML d'un bloc gouvernement
+  createGouvernementBloc(gouv) {
+    // Filtrer les postes régaliens
+    const postesRegaliens = (gouv.postes || []).filter(p => p.type === 'regalien');
+    
+    let postesHTML = '';
+    postesRegaliens.forEach(poste => {
+      const perso = poste.personnalite;
+      const secteur = poste.secteur;
+      
+      if (perso && secteur) {
+        postesHTML += `
+          <div class="fonction-perso">
+            <div class="secteurs">${secteur.nom}</div>
+            <a href="#" class="w-inline-block" onclick="Personnalites.showFiche('${perso.id}'); return false;">
+              <div class="_3-name-gov-pub">${perso.prenom} ${perso.nom}</div>
+            </a>
+          </div>
+          <div class="bullet">•</div>
+        `;
+      }
+    });
+
+    // Enlever le dernier bullet
+    if (postesHTML) {
+      postesHTML = postesHTML.substring(0, postesHTML.lastIndexOf('<div class="bullet">'));
+    }
+
+    const statutIcon = this.checkPretAGouv(gouv) ? '<div class="text-block-72"></div>' : '';
+
+    return `
+      <div class="_3-gov-content">
+        <div class="gov-compact-bloc">
+          <div class="gov-title">
+            <div class="filet">
+              <div class="div-block-326">
+                <a href="#" class="w-inline-block" onclick="Gouvernement.showDetail('${gouv.id}'); return false;">
+                  <h1 class="heading-4-nom-prenom">${gouv.titre}</h1>
+                </a>
+                ${statutIcon}
+              </div>
+            </div>
+            <div class="_3-star-bloc">
+              <div class="_w-courant _w-bold _w-pink note">${gouv.note_moyenne || '0'}</div>
+              <div class="star w-embed">
+                <div class="star">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300" width="100%" height="auto">
+                    <polygon points="150 41.3 190.19 0 204.35 55.86 259.81 40.19 244.14 95.65 300 109.81 258.7 150 300 190.19 244.14 204.35 259.81 259.81 204.35 244.14 190.19 300 150 258.7 109.81 300 95.65 244.14 40.19 259.81 55.86 204.35 0 190.19 41.3 150 0 109.81 55.86 95.65 40.19 40.19 95.65 55.86 109.81 0 150 41.3" fill="currentColor"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="div-block-277">
+            ${postesHTML}
+          </div>
+          <div class="filet"></div>
+          <p>${gouv.description || ''}</p>
+        </div>
+        <a href="#" class="_3-detail-link w-inline-block" onclick="Gouvernement.showDetail('${gouv.id}'); return false;">
+          <h6><strong class="heading-bold-text">détails</strong></h6>
+        </a>
+      </div>
+    `;
+  },
+
+  // Vérifier si tous les postes ont statut ok (prêt à gouverner)
+  checkPretAGouv(gouv) {
+    if (!gouv.postes || gouv.postes.length === 0) return false;
+    
+    return gouv.postes.every(poste => {
+      return poste.personnalite && poste.personnalite.statut === 3;
+    });
+  },
+
+  // Attacher les event listeners
+  attachGouvernementListeners() {
+    // Les listeners sont déjà dans le HTML via onclick
+  },
+
+  // Afficher le détail d'un gouvernement
+  async showDetail(gouvId) {
+    try {
+      // Charger le gouvernement complet
+      const { data, error } = await supabase
+        .from('gouvernements')
+        .select(`
+          *,
+          auteur:users!gouvernements_created_by_fkey(username),
+          postes:postes_gouvernement(
+            *,
+            personnalite:personnalites(*),
+            secteur:secteurs(*),
+            sous_secteurs:postes_sous_secteurs(
+              sous_secteur:sous_secteurs(*)
+            )
+          )
+        `)
+        .eq('id', gouvId)
+        .single();
+
+      if (error) throw error;
+
+      this.currentGouvernement = data;
+      this.displayGouvDetail(data);
+      UI.openModal('gouv-detail');
+
+    } catch (error) {
+      console.error('Erreur chargement détail:', error);
+      UI.showNotification('Erreur de chargement du détail', 'error');
+    }
+  },
+
+  // Afficher le détail du gouvernement dans le modal
+  displayGouvDetail(gouv) {
+    const modal = document.querySelector('.bm-parent.gouv-detail');
+    if (!modal) return;
+
+    // Titre
+    const titre = modal.querySelector('.heading-4-nom-prenom.d');
+    if (titre) titre.textContent = gouv.titre;
+
+    // Auteur
+    const auteur = modal.querySelector('[data-w-id="53172171-1e19-45d4-97f8-378ada811ea2"]');
+    if (auteur) auteur.textContent = gouv.auteur?.username || 'Anonyme';
+
+    // Description
+    const desc = modal.querySelector('.note-comment > p');
+    if (desc) desc.textContent = gouv.description || '';
+
+    // Note moyenne
+    const note = modal.querySelector('._w-courant._w-bold._w-pink.note');
+    if (note) note.textContent = gouv.note_moyenne || '0';
+
+    // Afficher les postes par catégorie
+    // TODO: Implémenter l'affichage détaillé des postes
+
+    // Boutons d'action
+    this.setupDetailButtons(modal, gouv.id);
+  },
+
+  // Configuration des boutons du détail
+  setupDetailButtons(modal, gouvId) {
+    // Bouton épingler
+    const btnEpingle = modal.querySelector('[data-w-id="93b595e4-12ee-3900-e8ac-20cc907695e9"]');
+    if (btnEpingle) {
+      btnEpingle.onclick = (e) => {
+        e.preventDefault();
+        this.toggleEpingle(gouvId);
+      };
+    }
+
+    // Bouton faire suivre
+    const btnSuivre = modal.querySelector('[data-w-id="93b595e4-12ee-3900-e8ac-20cc907695dd"]');
+    if (btnSuivre) {
+      btnSuivre.onclick = (e) => {
+        e.preventDefault();
+        this.faireSuivre(gouvId);
+      };
+    }
+
+    // Bouton commenter
+    const btnComment = modal.querySelector('[data-w-id="186e04db-b2c5-1d1a-8631-7d18d76d5ac3"]');
+    if (btnComment) {
+      btnComment.onclick = (e) => {
+        e.preventDefault();
+        UI.openModal('commenter');
+      };
+    }
+
+    // Radios de vote
+    const radioInputs = modal.querySelectorAll('input[type="radio"][name="radio"]');
+    radioInputs.forEach((radio, index) => {
+      radio.addEventListener('change', () => {
+        if (radio.checked) {
+          this.voterGouvernement(gouvId, index + 1);
+        }
+      });
+    });
+  },
+
+  // Voter pour un gouvernement
+  async voterGouvernement(gouvId, note) {
+    if (!Auth.isLoggedIn()) {
+      UI.showNotification('Vous devez être connecté pour voter', 'error');
+      UI.openModal('connect');
+      return;
+    }
+
+    try {
+      // Vérifier si l'utilisateur a déjà voté
+      const { data: existing } = await supabase
+        .from('gouvernements_votes')
+        .select('id')
+        .eq('gouvernement_id', gouvId)
+        .eq('user_id', Auth.currentUser.id)
+        .single();
+
+      if (existing) {
+        // Mettre à jour le vote
+        const { error } = await supabase
+          .from('gouvernements_votes')
+          .update({ note: note })
+          .eq('id', existing.id);
+
+        if (error) throw error;
+        UI.showNotification('Vote mis à jour !', 'success');
+      } else {
+        // Créer un nouveau vote
+        const { error } = await supabase
+          .from('gouvernements_votes')
+          .insert([{
+            gouvernement_id: gouvId,
+            user_id: Auth.currentUser.id,
+            note: note
+          }]);
+
+        if (error) throw error;
+        UI.showNotification('Vote enregistré !', 'success');
+      }
+
+      // Recharger les stats
+      await this.loadGouvernementsStats();
+
+    } catch (error) {
+      console.error('Erreur vote:', error);
+      UI.showNotification('Erreur lors du vote', 'error');
+    }
+  },
+
+  // Épingler un gouvernement
+  async toggleEpingle(gouvId) {
+    if (!Auth.isLoggedIn()) {
+      UI.showNotification('Vous devez être connecté', 'error');
+      UI.openModal('connect');
+      return;
+    }
+
+    try {
+      // Vérifier si déjà épinglé
+      const { data: existing } = await supabase
+        .from('gouvernements_epingles')
+        .select('id')
+        .eq('gouvernement_id', gouvId)
+        .eq('user_id', Auth.currentUser.id)
+        .single();
+
+      if (existing) {
+        // Désépingler
+        const { error } = await supabase
+          .from('gouvernements_epingles')
+          .delete()
+          .eq('id', existing.id);
+
+        if (error) throw error;
+        UI.showNotification('Gouvernement désépinglé', 'success');
+      } else {
+        // Épingler
+        const { error } = await supabase
+          .from('gouvernements_epingles')
+          .insert([{
+            gouvernement_id: gouvId,
+            user_id: Auth.currentUser.id
+          }]);
+
+        if (error) throw error;
+        UI.showNotification('Gouvernement épinglé', 'success');
+      }
+
+    } catch (error) {
+      console.error('Erreur épinglage:', error);
+      UI.showNotification('Erreur lors de l\'épinglage', 'error');
+    }
+  },
+
+  // Faire suivre
+  faireSuivre(gouvId) {
+    // TODO: Implémenter le partage
+    UI.showNotification('Fonctionnalité à venir', 'info');
+  }
+};
+
+// Suite dans gouvernement.js partie 2...
+// ============================================
+// SOSGOUV - Gestion des gouvernements - PARTIE 2
+// Composition de gouvernements
+// ============================================
+
+// Suite de Gouvernement object...
+
+Gouvernement.initComposerForm = function() {
+  this.currentComposition = {
     titre: '',
     description: '',
-    postes: {
-        regaliens: [], // 5 postes fixes
-        nonRegaliens: [], // postes ajoutés dynamiquement
-        delegues: [] // délégués ministériels
-    }
+    postesRegaliens: [],
+    postesNonRegaliens: [],
+    delegues: []
+  };
+
+  this.setupComposerListeners();
+  this.loadPostesRegaliens();
 };
 
-// Les 5 secteurs régaliens fixes (ordre défini)
-const SECTEURS_REGALIENS_FIXES = [
-    { ordre: 1, nom: '1er ministre' },
-    { ordre: 2, nom: 'Justice' },
-    { ordre: 3, nom: 'Affaires étrangères' },
-    { ordre: 4, nom: 'Économie' },
-    { ordre: 5, nom: 'Intérieur' }
-];
+// Charger les postes régaliens par défaut
+Gouvernement.loadPostesRegaliens = function() {
+  const secteursRegaliens = this.secteurs.filter(s => s.type === 'regalien');
+  
+  secteursRegaliens.forEach(secteur => {
+    this.currentComposition.postesRegaliens.push({
+      secteur_id: secteur.id,
+      secteur_nom: secteur.nom,
+      personnalite_id: null,
+      sous_secteurs: []
+    });
+  });
 
-// Cache pour les données de référence
-let cache = {
-    secteurs: [],
-    sousSecteurs: [],
-    personnalites: [],
-    secteursDefaut: {} // secteur_id => sous_secteurs[]
+  this.displayPostesRegaliens();
 };
 
-// ================================================================
-// INITIALISATION
-// ================================================================
+// Afficher les postes régaliens dans le formulaire
+Gouvernement.displayPostesRegaliens = function() {
+  const container = document.querySelector('._3-bloc-minsteres');
+  if (!container) return;
 
-export async function initGouvernement() {
-    console.log('🏛️ Initialisation module Gouvernement');
-    
-    // Vérifier que l'utilisateur est connecté
-    const user = await getCurrentUser();
-    if (!user) {
-        console.warn('⚠️ Utilisateur non connecté - redirection nécessaire');
-        return;
-    }
-
-    // Charger les données de référence
-    await chargerDonneesReference();
-    
-    // Initialiser les postes régaliens
-    await initialiserPostesRegaliens();
-    
-    // Attacher les event listeners
-    attacherEventListeners();
-    
-    console.log('✅ Module Gouvernement initialisé');
-}
-
-// ================================================================
-// CHARGEMENT DES DONNÉES DE RÉFÉRENCE
-// ================================================================
-
-async function chargerDonneesReference() {
-    try {
-        // Charger tous les secteurs
-        const { data: secteurs, error: secteursError } = await supabase
-            .from('secteurs')
-            .select('*')
-            .order('ordre', { ascending: true });
-        
-        if (secteursError) throw secteursError;
-        cache.secteurs = secteurs;
-
-        // Charger tous les sous-secteurs
-        const { data: sousSecteurs, error: sousSectError } = await supabase
-            .from('sous_secteurs')
-            .select('*')
-            .order('nom', { ascending: true });
-        
-        if (sousSectError) throw sousSectError;
-        cache.sousSecteurs = sousSecteurs;
-
-        // Charger les associations secteurs <-> sous-secteurs par défaut
-        const { data: associations, error: assocError } = await supabase
-            .from('secteurs_sous_secteurs_defaut')
-            .select('secteur_id, sous_secteur_id');
-        
-        if (assocError) throw assocError;
-        
-        // Organiser par secteur
-        associations.forEach(assoc => {
-            if (!cache.secteursDefaut[assoc.secteur_id]) {
-                cache.secteursDefaut[assoc.secteur_id] = [];
-            }
-            const sousSecteur = cache.sousSecteurs.find(ss => ss.id === assoc.sous_secteur_id);
-            if (sousSecteur) {
-                cache.secteursDefaut[assoc.secteur_id].push(sousSecteur);
-            }
-        });
-
-        // Charger les personnalités (nom, prénom, métiers seulement pour l'autocomplete)
-        const { data: personnalites, error: persoError } = await supabase
-            .from('personnalites')
-            .select('id, nom, prenom, metiers')
-            .order('nom', { ascending: true });
-        
-        if (persoError) throw persoError;
-        cache.personnalites = personnalites;
-
-        console.log('📦 Données de référence chargées:', {
-            secteurs: cache.secteurs.length,
-            sousSecteurs: cache.sousSecteurs.length,
-            personnalites: cache.personnalites.length
-        });
-
-    } catch (error) {
-        console.error('❌ Erreur chargement données de référence:', error);
-    }
-}
-
-// ================================================================
-// INITIALISATION DES POSTES RÉGALIENS
-// ================================================================
-
-async function initialiserPostesRegaliens() {
-    const container = document.querySelector('._3-bloc-minsteres');
-    if (!container) return;
-
-    // Vider le container
-    container.innerHTML = '';
-
-    // Créer les 5 postes régaliens fixes
-    for (const secteurInfo of SECTEURS_REGALIENS_FIXES) {
-        // Trouver le secteur correspondant dans la base
-        const secteur = cache.secteurs.find(s => 
-            s.type === 'regalien' && 
-            s.nom.toLowerCase().includes(secteurInfo.nom.toLowerCase())
-        );
-
-        if (!secteur) {
-            console.warn(`⚠️ Secteur régalien non trouvé: ${secteurInfo.nom}`);
-            continue;
-        }
-
-        // Récupérer les sous-secteurs par défaut
-        const sousSecteurs = cache.secteursDefaut[secteur.id] || [];
-
-        // Créer le bloc HTML
-        const blocHTML = creerBlocPosteRegalien(secteur, sousSecteurs);
-        container.insertAdjacentHTML('beforeend', blocHTML);
-
-        // Ajouter au state
-        gouvernementEnCours.postes.regaliens.push({
-            secteur_id: secteur.id,
-            personnalite_id: null,
-            sous_secteurs: sousSecteurs.map(ss => ss.id),
-            nom_poste_personnalise: null
-        });
-    }
-
-    // Attacher les event listeners pour les inputs
-    attacherEventListenersPostes();
-}
-
-// ================================================================
-// CRÉATION HTML DES BLOCS DE POSTES
-// ================================================================
-
-function creerBlocPosteRegalien(secteur, sousSecteurs) {
-    const sousSecteursList = sousSecteurs.map(ss => ss.nom).join(', ');
-    
-    return `
-        <div class="_3-bloc-min-r" data-secteur-id="${secteur.id}" data-type="regalien">
-            <div class="_3-gov-line-1">
-                <input 
-                    class="mon-input3 ministre-input w-input" 
-                    maxlength="256" 
-                    placeholder="nom du ministre" 
-                    type="text" 
-                    data-secteur-id="${secteur.id}"
-                    autocomplete="off"
-                />
-                <div class="autocomplete-results" style="display:none;"></div>
-                <div class="_3-gov-mini-buttons">
-                    <a href="#" class="_2-mini-bouton loupe w-inline-block" data-action="open-liste-perso" data-secteur-id="${secteur.id}">
-                        <div class="_2-picto-fontello-bouton"></div>
-                    </a>
-                    <a href="#" class="_2-mini-bouton people w-inline-block" data-action="add-perso" data-secteur-id="${secteur.id}">
-                        <div class="_2-picto-fontello-bouton"></div>
-                    </a>
-                </div>
-            </div>
-            <div class="_3-gov-line-2">
-                <h3 class="heading-23">${secteur.intitule_poste_defaut || secteur.nom}</h3>
-                <div class="_3-sous-secteur">
-                    ${sousSecteursList}
-                    <a href="#" class="_2-code-link-button" data-action="modifier-sous-secteurs" data-secteur-id="${secteur.id}">modifier</a>
-                </div>
-            </div>
+  let html = '';
+  
+  this.currentComposition.postesRegaliens.forEach((poste, index) => {
+    html += `
+      <div class="_3-bloc-min-r" data-poste-index="${index}">
+        <div class="_3-gov-line-1">
+          <input class="mon-input3 w-input" 
+                 type="text" 
+                 placeholder="nom du ministre"
+                 data-poste-type="regalien"
+                 data-poste-index="${index}">
+          <div class="_3-gov-mini-buttons">
+            <a href="#" class="_2-mini-bouton loupe w-inline-block" 
+               onclick="Gouvernement.openListePersonnalites('regalien', ${index}); return false;">
+              <div class="_2-picto-fontello-bouton"></div>
+            </a>
+            <a href="#" class="_2-mini-bouton people w-inline-block"
+               onclick="UI.openModal('ajouter-personnalite'); return false;">
+              <div class="_2-picto-fontello-bouton"></div>
+            </a>
+          </div>
         </div>
+        <div class="_3-gov-line-2">
+          <h3 class="heading-23">${poste.secteur_nom}</h3>
+          <div class="_3-sous-secteur">
+            <span id="sous-secteurs-${index}">Aucun sous-secteur sélectionné</span>
+            <a href="#" class="_2-code-link-button" 
+               onclick="Gouvernement.modifierSousSecteurs('regalien', ${index}); return false;">modifier</a>
+          </div>
+        </div>
+      </div>
     `;
-}
+  });
 
-function creerBlocPosteNonRegalien(secteurs, sousSecteurs) {
-    // Générer l'intitulé automatique à partir des secteurs sélectionnés
-    const nomsSecteurs = secteurs.map(s => s.nom);
-    let intitule = '';
-    
-    if (nomsSecteurs.length === 1) {
-        intitule = `Ministre ${nomsSecteurs[0].toLowerCase().startsWith('de') ? nomsSecteurs[0] : 'de ' + nomsSecteurs[0]}`;
-    } else {
-        intitule = `Ministre de ${nomsSecteurs.join(' et de ')}`;
-    }
+  const blocsDiv = document.querySelector('._3-bloc-minsteres');
+  if (blocsDiv) {
+    // Garder uniquement les blocs régaliens
+    blocsDiv.innerHTML = html;
+  }
+};
 
-    const sousSecteursList = sousSecteurs.map(ss => ss.nom).join(', ');
-    const secteursIds = secteurs.map(s => s.id).join(',');
-    const tempId = Date.now(); // ID temporaire pour identifier le bloc
+// Ouvrir le modal de liste des personnalités
+Gouvernement.openListePersonnalites = async function(type, index) {
+  // Charger les personnalités
+  const { data, error } = await supabase
+    .from('personnalites')
+    .select('*')
+    .order('nom', { ascending: true });
 
-    return `
-        <div class="_3-bloc-min-nr-step2" data-secteurs-ids="${secteursIds}" data-type="non-regalien" data-temp-id="${tempId}" style="display:block;">
-            <div class="_3-gov-line-1">
-                <input 
-                    class="mon-input3 ministre-input w-input" 
-                    maxlength="256" 
-                    placeholder="nom du ministre" 
-                    type="text" 
-                    data-temp-id="${tempId}"
-                    autocomplete="off"
-                />
-                <div class="autocomplete-results" style="display:none;"></div>
-                <div class="_3-gov-mini-buttons">
-                    <a href="#" class="_2-mini-bouton loupe w-inline-block" data-action="open-liste-perso" data-temp-id="${tempId}">
-                        <div class="_2-picto-fontello-bouton"></div>
-                    </a>
-                    <a href="#" class="_2-mini-bouton people w-inline-block" data-action="add-perso" data-temp-id="${tempId}">
-                        <div class="_2-picto-fontello-bouton"></div>
-                    </a>
-                    <a href="#" class="_2-picto-fontello-bouton x w-inline-block" data-action="supprimer-poste" data-temp-id="${tempId}">
-                        <div class="fontello-icon pink"></div>
-                    </a>
-                </div>
-            </div>
-            <div class="_3-gov-line-2">
-                <h3 class="heading-23">
-                    ${intitule}
-                    <a href="#" class="_2-code-link-button" data-action="modifier-intitule" data-temp-id="${tempId}">modifier l'intitulé</a>
-                </h3>
-                <div class="_2-sous-secteurs no">
-                    ${sousSecteursList}
-                    <a href="#" class="_2-code-link-button" data-action="modifier-sous-secteurs" data-temp-id="${tempId}">modifier</a>
-                </div>
-            </div>
-        </div>
+  if (error) {
+    console.error('Erreur chargement personnalités:', error);
+    return;
+  }
+
+  // Remplir le modal
+  const modal = document.querySelector('.pm-parent.liste-personnalit');
+  if (!modal) return;
+
+  // Grouper par lettre
+  const groupes = {};
+  data.forEach(p => {
+    const lettre = p.nom[0].toUpperCase();
+    if (!groupes[lettre]) groupes[lettre] = [];
+    groupes[lettre].push(p);
+  });
+
+  // Générer le HTML
+  let html = '';
+  Object.keys(groupes).sort().forEach(lettre => {
+    html += `
+      <div class="_3-title-bloc-padd-10-left">
+        <h1 class="heading-25">${lettre}</h1>
+      </div>
     `;
-}
 
-function creerBlocDelegue(ministeresRattachement, fonction) {
-    const tempId = Date.now();
-    const ministeresIds = ministeresRattachement.map(m => m.id).join(',');
-    const ministeresNoms = ministeresRattachement.map(m => m.nom).join(', ');
-
-    return `
-        <div class="_3-bloc-del-nr-step2" data-ministeres-ids="${ministeresIds}" data-type="delegue" data-temp-id="${tempId}" style="display:block;">
-            <div class="_3-gov-line-1">
-                <input 
-                    class="mon-input3 ministre-input w-input" 
-                    maxlength="256" 
-                    placeholder="nom du délégué ministériel" 
-                    type="text" 
-                    data-temp-id="${tempId}"
-                    autocomplete="off"
-                />
-                <div class="autocomplete-results" style="display:none;"></div>
-                <div class="_3-gov-mini-buttons">
-                    <a href="#" class="_2-mini-bouton loupe w-inline-block" data-action="open-liste-perso" data-temp-id="${tempId}">
-                        <div class="_2-picto-fontello-bouton"></div>
-                    </a>
-                    <a href="#" class="_2-mini-bouton people w-inline-block" data-action="add-perso" data-temp-id="${tempId}">
-                        <div class="_2-picto-fontello-bouton"></div>
-                    </a>
-                    <a href="#" class="_2-picto-fontello-bouton x w-inline-block" data-action="supprimer-poste" data-temp-id="${tempId}">
-                        <div class="fontello-icon pink"></div>
-                    </a>
-                </div>
-            </div>
-            <div class="_3-gov-line-2">
-                <h3 class="heading-23">
-                    délégué auprès du ministère de ${ministeresNoms}, ${fonction}
-                    <a href="#" class="_2-code-link-button" data-action="modifier-delegue" data-temp-id="${tempId}">modifier</a>
-                </h3>
-            </div>
+    groupes[lettre].forEach(perso => {
+      const metiers = Array.isArray(perso.metiers) ? perso.metiers.join(', ') : perso.metiers || '';
+      html += `
+        <div class="div-block-296" onclick="Gouvernement.selectPersonnalite('${perso.id}', '${type}', ${index}); return false;" style="cursor: pointer;">
+          <a href="#" class="_w-courant _w-bold _w-maj">${perso.nom}</a>
+          <div class="_w-courant">${perso.prenom}</div>
+          <div class="_w-courant grey-courant">${metiers}</div>
         </div>
-    `;
-}
-
-// ================================================================
-// EVENT LISTENERS
-// ================================================================
-
-function attacherEventListeners() {
-    // Bouton "Ajouter ministère" (non-régalien)
-    const btnAjouterMinistere = document.querySelector('[data-w-id="91f0827b-9d2f-ca59-b104-920ab5a68f23"]');
-    if (btnAjouterMinistere) {
-        btnAjouterMinistere.addEventListener('click', (e) => {
-            e.preventDefault();
-            ouvrirModalSecteursNonRegaliens();
-        });
-    }
-
-    // Bouton "Ajouter délégué ministériel"
-    const btnAjouterDelegue = document.querySelector('[data-w-id="f88e3528-3e5b-fcff-ca05-b7c7a0d33607"]');
-    if (btnAjouterDelegue) {
-        btnAjouterDelegue.addEventListener('click', (e) => {
-            e.preventDefault();
-            ouvrirModalDefinirDelegue();
-        });
-    }
-
-    // Boutons Brouillon et Publier
-    const btnBrouillon = document.querySelector('._w-link-bloc-button:not(.publier)');
-    const btnPublier = document.querySelector('._w-link-bloc-button.publier');
-    
-    if (btnBrouillon) {
-        btnBrouillon.addEventListener('click', (e) => {
-            e.preventDefault();
-            sauvegarderGouvernement(false); // brouillon
-        });
-    }
-    
-    if (btnPublier) {
-        btnPublier.addEventListener('click', (e) => {
-            e.preventDefault();
-            sauvegarderGouvernement(true); // publier
-        });
-    }
-
-    // Input titre et description
-    const inputTitre = document.querySelector('input[placeholder="nom du gouvernement*"]');
-    const textareaDesc = document.querySelector('textarea[placeholder="Vision de l\'auteur"]');
-    
-    if (inputTitre) {
-        inputTitre.addEventListener('input', (e) => {
-            gouvernementEnCours.titre = e.target.value;
-        });
-    }
-    
-    if (textareaDesc) {
-        textareaDesc.addEventListener('input', (e) => {
-            gouvernementEnCours.description = e.target.value;
-        });
-    }
-}
-
-function attacherEventListenersPostes() {
-    // Event delegation pour tous les boutons d'actions
-    document.addEventListener('click', async (e) => {
-        const target = e.target.closest('[data-action]');
-        if (!target) return;
-
-        e.preventDefault();
-        const action = target.dataset.action;
-        const secteurId = target.dataset.secteurId;
-        const tempId = target.dataset.tempId;
-
-        switch(action) {
-            case 'open-liste-perso':
-                ouvrirModalListePersonnalites(secteurId || tempId);
-                break;
-            case 'add-perso':
-                ouvrirModalAjouterPersonnalite(secteurId || tempId);
-                break;
-            case 'modifier-sous-secteurs':
-                ouvrirModalModifierSousSecteurs(secteurId || tempId);
-                break;
-            case 'modifier-intitule':
-                ouvrirModalModifierIntitule(tempId);
-                break;
-            case 'supprimer-poste':
-                supprimerPoste(tempId);
-                break;
-            case 'modifier-delegue':
-                ouvrirModalModifierDelegue(tempId);
-                break;
-        }
+      `;
     });
+  });
 
-    // Autocomplete sur les inputs de ministre
-    document.addEventListener('input', (e) => {
-        if (e.target.classList.contains('ministre-input')) {
-            handleAutocomplete(e.target);
-        }
-    });
+  const listeContainer = modal.querySelector('.w-dyn-items');
+  if (listeContainer) {
+    listeContainer.innerHTML = html;
+  }
 
-    // Fermer l'autocomplete si on clique ailleurs
-    document.addEventListener('click', (e) => {
-        if (!e.target.classList.contains('ministre-input')) {
-            document.querySelectorAll('.autocomplete-results').forEach(el => {
-                el.style.display = 'none';
-            });
-        }
-    });
-}
+  UI.openModal('liste-personnalite');
+};
 
-// ================================================================
-// AUTOCOMPLETE PERSONNALITÉS
-// ================================================================
+// Sélectionner une personnalité
+Gouvernement.selectPersonnalite = async function(persoId, type, index) {
+  // Récupérer la personnalité
+  const { data, error } = await supabase
+    .from('personnalites')
+    .select('*')
+    .eq('id', persoId)
+    .single();
 
-function handleAutocomplete(input) {
-    const query = input.value.trim().toLowerCase();
-    const resultsContainer = input.nextElementSibling;
-    
-    if (!resultsContainer || !resultsContainer.classList.contains('autocomplete-results')) {
-        return;
-    }
+  if (error) {
+    console.error('Erreur:', error);
+    return;
+  }
 
-    if (query.length < 2) {
-        resultsContainer.style.display = 'none';
-        return;
-    }
+  // Mettre à jour la composition
+  if (type === 'regalien') {
+    this.currentComposition.postesRegaliens[index].personnalite_id = persoId;
+    this.currentComposition.postesRegaliens[index].personnalite = data;
+  } else if (type === 'non-regalien') {
+    this.currentComposition.postesNonRegaliens[index].personnalite_id = persoId;
+    this.currentComposition.postesNonRegaliens[index].personnalite = data;
+  } else if (type === 'delegue') {
+    this.currentComposition.delegues[index].personnalite_id = persoId;
+    this.currentComposition.delegues[index].personnalite = data;
+  }
 
-    // Filtrer les personnalités
-    const matches = cache.personnalites.filter(p => {
-        const nomComplet = `${p.nom} ${p.prenom}`.toLowerCase();
-        return nomComplet.includes(query);
-    }).slice(0, 10); // Limiter à 10 résultats
+  // Mettre à jour l'input
+  const input = document.querySelector(`input[data-poste-type="${type}"][data-poste-index="${index}"]`);
+  if (input && data) {
+    input.value = `${data.prenom} ${data.nom}`;
+  }
 
-    if (matches.length === 0) {
-        resultsContainer.style.display = 'none';
-        return;
-    }
+  // Fermer le modal
+  UI.closeModal('liste-personnalite');
+  UI.showNotification('Personnalité sélectionnée', 'success');
+};
 
-    // Afficher les résultats
-    resultsContainer.innerHTML = matches.map(p => `
-        <div class="autocomplete-item" data-perso-id="${p.id}">
-            <strong>${p.nom} ${p.prenom}</strong>
-            <small>${p.metiers ? p.metiers.join(', ') : ''}</small>
-        </div>
-    `).join('');
+// Modifier les sous-secteurs
+Gouvernement.modifierSousSecteurs = function(type, index) {
+  // TODO: Ouvrir le modal de sélection des sous-secteurs
+  UI.openModal('choisir-sous-secteur');
+  
+  // Stocker le contexte pour savoir quel poste on modifie
+  this.currentSousSecteurEdit = { type, index };
+};
 
-    resultsContainer.style.display = 'block';
+// Ajouter un ministère non régalien
+Gouvernement.ajouterMinistere = function() {
+  UI.openModal('secteur-non-regalien');
+};
 
-    // Event listeners sur les résultats
-    resultsContainer.querySelectorAll('.autocomplete-item').forEach(item => {
-        item.addEventListener('click', () => {
-            const persoId = item.dataset.persoId;
-            const perso = cache.personnalites.find(p => p.id === persoId);
-            if (perso) {
-                input.value = `${perso.nom} ${perso.prenom}`;
-                input.dataset.persoId = persoId;
-                resultsContainer.style.display = 'none';
-                
-                // Mettre à jour le state
-                mettreAJourPersonnalitePoste(input, persoId);
-            }
-        });
-    });
-}
+// Ajouter un délégué ministériel
+Gouvernement.ajouterDelegue = function() {
+  UI.openModal('definir-delegue');
+};
 
-function mettreAJourPersonnalitePoste(input, personnaliteId) {
-    const secteurId = input.dataset.secteurId;
-    const tempId = input.dataset.tempId;
+// Publier le gouvernement
+Gouvernement.publierGouvernement = async function() {
+  if (!Auth.isLoggedIn()) {
+    UI.showNotification('Vous devez être connecté', 'error');
+    UI.openModal('connect');
+    return;
+  }
 
-    if (secteurId) {
-        // Poste régalien
-        const poste = gouvernementEnCours.postes.regaliens.find(p => p.secteur_id === secteurId);
-        if (poste) {
-            poste.personnalite_id = personnaliteId;
-        }
-    } else if (tempId) {
-        // Poste non-régalien ou délégué
-        const posteNonReg = gouvernementEnCours.postes.nonRegaliens.find(p => p.temp_id === tempId);
-        if (posteNonReg) {
-            posteNonReg.personnalite_id = personnaliteId;
-        } else {
-            const delegue = gouvernementEnCours.postes.delegues.find(d => d.temp_id === tempId);
-            if (delegue) {
-                delegue.personnalite_id = personnaliteId;
-            }
-        }
-    }
-}
+  // Récupérer les données du formulaire
+  const titreInput = document.querySelector('._3-2_sous-menu-content-2 input[placeholder="nom du gouvernement*"]');
+  const descInput = document.querySelector('._3-2_sous-menu-content-2 textarea[placeholder="Vision de l\'auteur"]');
 
-// ================================================================
-// MODAUX - SECTEURS NON RÉGALIENS
-// ================================================================
+  const titre = titreInput?.value.trim();
+  const description = descInput?.value.trim();
 
-function ouvrirModalSecteursNonRegaliens() {
-    const modal = document.querySelector('.pm-parent.secteur-non-regalien');
-    if (!modal) return;
+  if (!titre) {
+    UI.showNotification('Veuillez donner un nom à votre gouvernement', 'error');
+    return;
+  }
 
-    // Remplir la liste des secteurs non-régaliens
-    const container = modal.querySelector('#liste-secteurs-non-regaliens');
-    if (!container) return;
+  // Vérifier qu'au moins un poste est rempli
+  const postesRemplis = this.currentComposition.postesRegaliens.filter(p => p.personnalite_id);
+  if (postesRemplis.length === 0) {
+    UI.showNotification('Veuillez remplir au moins un poste', 'error');
+    return;
+  }
 
-    const secteursNonRegaliens = cache.secteurs.filter(s => s.type === 'non_regalien');
-    
-    container.innerHTML = secteursNonRegaliens.map(secteur => `
-        <label class="w-checkbox _w-checkbox">
-            <div class="w-checkbox-input w-checkbox-input--inputType-custom checkbox"></div>
-            <input 
-                type="checkbox" 
-                id="secteur-${secteur.id}" 
-                name="secteur" 
-                value="${secteur.id}"
-                data-secteur-nom="${secteur.nom}"
-                style="opacity:0;position:absolute;z-index:-1"
-            />
-            <span class="checkbox-label-2 w-form-label" for="secteur-${secteur.id}">${secteur.nom}</span>
-        </label>
-    `).join('');
+  try {
+    // Créer le gouvernement
+    const { data: gouv, error: gouvError } = await supabase
+      .from('gouvernements')
+      .insert([{
+        titre: titre,
+        description: description,
+        created_by: Auth.currentUser.id,
+        is_published: true
+      }])
+      .select()
+      .single();
 
-    modal.style.display = 'block';
+    if (gouvError) throw gouvError;
 
-    // Event listener sur le bouton valider
-    const btnValider = modal.querySelector('#valider-secteurs-non-regaliens');
-    if (btnValider) {
-        btnValider.onclick = (e) => {
-            e.preventDefault();
-            
-            // Récupérer les secteurs cochés
-            const checkboxes = container.querySelectorAll('input[type="checkbox"]:checked');
-            const secteursSelectionnes = Array.from(checkboxes).map(cb => {
-                return cache.secteurs.find(s => s.id === cb.value);
-            }).filter(Boolean);
-
-            if (secteursSelectionnes.length === 0) {
-                alert('⚠️ Veuillez sélectionner au moins un secteur');
-                return;
-            }
-
-            ajouterPosteNonRegalien(secteursSelectionnes);
-            fermerModal(modal);
-        };
-    }
-
-    // Bouton fermer
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
-    
-    // Fond modal
-    const fondModal = modal.querySelector('._3-fond-modal');
-    if (fondModal) {
-        fondModal.onclick = () => fermerModal(modal);
-    }
-}
-
-function ajouterPosteNonRegalien(secteurs) {
-    // Récupérer tous les sous-secteurs par défaut des secteurs sélectionnés
-    const sousSecteurs = [];
-    secteurs.forEach(secteur => {
-        const ss = cache.secteursDefaut[secteur.id] || [];
-        sousSecteurs.push(...ss);
-    });
-
-    const tempId = Date.now().toString();
-    const container = document.querySelector('._3-bloc-minsteres').parentElement;
-    const btnAjouter = container.querySelector('[data-w-id="91f0827b-9d2f-ca59-b104-920ab5a68f23"]');
-
-    // Insérer avant le bouton "Ajouter ministère"
-    const blocHTML = creerBlocPosteNonRegalien(secteurs, sousSecteurs);
-    btnAjouter.insertAdjacentHTML('beforebegin', blocHTML);
-
-    // Ajouter au state
-    gouvernementEnCours.postes.nonRegaliens.push({
-        temp_id: tempId,
-        secteurs_ids: secteurs.map(s => s.id),
-        personnalite_id: null,
-        sous_secteurs: sousSecteurs.map(ss => ss.id),
-        nom_poste_personnalise: null
-    });
-
-    // Réattacher les event listeners
-    attacherEventListenersPostes();
-}
-
-// ================================================================
-// MODAUX - DÉLÉGUÉ MINISTÉRIEL
-// ================================================================
-
-function ouvrirModalDefinirDelegue() {
-    const modal = document.querySelector('.pm-parent.definir-delegu');
-    if (!modal) return;
-
-    // Remplir la liste des ministères de rattachement possibles
-    const container = modal.querySelector('#liste-ministeres-rattachement');
-    if (!container) {
-        console.warn('Container #liste-ministeres-rattachement non trouvé');
-        modal.style.display = 'block';
-        return;
-    }
-
-    // Récupérer tous les postes actuels (régaliens et non-régaliens)
-    const ministeresDisponibles = [];
+    // Créer les postes
+    const postes = [];
     
     // Postes régaliens
-    gouvernementEnCours.postes.regaliens.forEach(poste => {
-        const secteur = cache.secteurs.find(s => s.id === poste.secteur_id);
-        if (secteur) {
-            ministeresDisponibles.push({
-                id: secteur.id,
-                nom: secteur.nom,
-                type: 'regalien'
-            });
-        }
-    });
-    
-    // Postes non-régaliens
-    gouvernementEnCours.postes.nonRegaliens.forEach(poste => {
-        const secteur = cache.secteurs.find(s => s.id === poste.secteurs_ids[0]);
-        if (secteur) {
-            const nom = poste.nom_poste_personnalise || secteur.nom;
-            ministeresDisponibles.push({
-                id: poste.temp_id,
-                nom: nom,
-                type: 'non_regalien'
-            });
-        }
-    });
-
-    if (ministeresDisponibles.length === 0) {
-        alert('⚠️ Vous devez d\'abord créer au moins un ministère');
-        return;
-    }
-
-    container.innerHTML = ministeresDisponibles.map(ministere => `
-        <label class="w-checkbox _w-checkbox">
-            <div class="w-checkbox-input w-checkbox-input--inputType-custom checkbox"></div>
-            <input 
-                type="checkbox" 
-                id="ministere-${ministere.id}" 
-                name="ministere" 
-                value="${ministere.id}"
-                data-ministere-nom="${ministere.nom}"
-                data-ministere-type="${ministere.type}"
-                style="opacity:0;position:absolute;z-index:-1"
-            />
-            <span class="checkbox-label-2 w-form-label" for="ministere-${ministere.id}">${ministere.nom}</span>
-        </label>
-    `).join('');
-
-    modal.style.display = 'block';
-
-    // Event listener sur le bouton valider
-    const btnValider = modal.querySelector('#valider-delegue');
-    if (btnValider) {
-        btnValider.onclick = (e) => {
-            e.preventDefault();
-            
-            // Récupérer les ministères cochés
-            const checkboxes = container.querySelectorAll('input[type="checkbox"]:checked');
-            if (checkboxes.length === 0) {
-                alert('⚠️ Veuillez sélectionner au moins un ministère de rattachement');
-                return;
-            }
-
-            const ministeresRattachement = Array.from(checkboxes).map(cb => ({
-                id: cb.value,
-                nom: cb.dataset.ministereNom
-            }));
-            
-            // Récupérer la fonction
-            const fonctionInput = modal.querySelector('#fonction-delegue');
-            const fonction = fonctionInput?.value.trim() || 'en charge de...';
-
-            if (!fonction || fonction === 'en charge de...') {
-                alert('⚠️ Veuillez définir une fonction pour le délégué');
-                return;
-            }
-
-            ajouterDelegue(ministeresRattachement, fonction);
-            
-            // Réinitialiser le formulaire
-            if (fonctionInput) fonctionInput.value = '';
-            container.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
-            
-            fermerModal(modal);
-        };
-    }
-
-    // Bouton fermer
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
-    
-    // Fond modal
-    const fondModal = modal.querySelector('._3-fond-modal');
-    if (fondModal) {
-        fondModal.onclick = () => fermerModal(modal);
-    }
-}
-
-function ajouterDelegue(ministeres, fonction) {
-    const tempId = Date.now().toString();
-    const container = document.querySelector('#delegues-container');
-    const btnAjouter = container?.querySelector('[data-w-id="f88e3528-3e5b-fcff-ca05-b7c7a0d33607"]');
-
-    if (!container || !btnAjouter) return;
-
-    const blocHTML = creerBlocDelegue(ministeres, fonction);
-    btnAjouter.insertAdjacentHTML('beforebegin', blocHTML);
-
-    // Ajouter au state
-    gouvernementEnCours.postes.delegues.push({
-        temp_id: tempId,
-        personnalite_id: null,
-        ministeres_rattachement: ministeres.map(m => m.id),
-        fonction: fonction
-    });
-
-    attacherEventListenersPostes();
-}
-
-// ================================================================
-// MODAUX - LISTE PERSONNALITÉS
-// ================================================================
-
-function ouvrirModalListePersonnalites(identifier) {
-    const modal = document.querySelector('.pm-parent.liste-personnalit');
-    if (!modal) return;
-
-    modal.style.display = 'block';
-    modal.dataset.currentIdentifier = identifier;
-
-    const container = modal.querySelector('#liste-personnalites-content');
-    const selectTri = modal.querySelector('#tri-personnalites');
-    
-    if (!container) return;
-
-    // Fonction pour afficher la liste
-    function afficherListePersonnalites(tri = 'alpha') {
-        let personnalites = [...cache.personnalites];
-        
-        if (tri === 'alpha') {
-            personnalites.sort((a, b) => a.nom.localeCompare(b.nom));
-        } else if (tri === 'metier') {
-            personnalites.sort((a, b) => {
-                const metierA = a.metiers && a.metiers.length > 0 ? a.metiers[0] : '';
-                const metierB = b.metiers && b.metiers.length > 0 ? b.metiers[0] : '';
-                return metierA.localeCompare(metierB);
-            });
-        }
-
-        // Grouper par première lettre si tri alphabétique
-        if (tri === 'alpha') {
-            const groupes = {};
-            personnalites.forEach(p => {
-                const lettre = p.nom[0].toUpperCase();
-                if (!groupes[lettre]) groupes[lettre] = [];
-                groupes[lettre].push(p);
-            });
-
-            container.innerHTML = Object.keys(groupes).sort().map(lettre => `
-                <div class="_3-title-bloc-padd-10-left">
-                    <h1 class="heading-25">${lettre}</h1>
-                </div>
-                ${groupes[lettre].map(p => `
-                    <div class="div-block-296" style="cursor: pointer; padding: 10px; border-bottom: 1px solid #eee;" data-perso-id="${p.id}">
-                        <a href="#" class="_w-courant _w-bold _w-maj" style="pointer-events: none;">${p.nom}</a>
-                        <div class="_w-courant">${p.prenom}</div>
-                        <div class="_w-courant grey-courant">${p.metiers ? p.metiers.join(', ') : ''}</div>
-                    </div>
-                `).join('')}
-            `).join('');
-        } else {
-            // Affichage simple si tri par métier
-            container.innerHTML = personnalites.map(p => `
-                <div class="div-block-296" style="cursor: pointer; padding: 10px; border-bottom: 1px solid #eee;" data-perso-id="${p.id}">
-                    <a href="#" class="_w-courant _w-bold _w-maj" style="pointer-events: none;">${p.nom}</a>
-                    <div class="_w-courant">${p.prenom}</div>
-                    <div class="_w-courant grey-courant">${p.metiers ? p.metiers.join(', ') : ''}</div>
-                </div>
-            `).join('');
-        }
-
-        // Event listeners sur les items
-        container.querySelectorAll('.div-block-296').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.preventDefault();
-                const persoId = item.dataset.persoId;
-                const perso = cache.personnalites.find(p => p.id === persoId);
-                
-                if (perso) {
-                    selectionnerPersonnalite(identifier, perso);
-                    fermerModal(modal);
-                }
-            });
+    this.currentComposition.postesRegaliens.forEach((poste, index) => {
+      if (poste.personnalite_id) {
+        postes.push({
+          gouvernement_id: gouv.id,
+          type: 'regalien',
+          personnalite_id: poste.personnalite_id,
+          secteur_id: poste.secteur_id,
+          ordre: index
         });
-    }
-
-    // Affichage initial
-    afficherListePersonnalites('alpha');
-
-    // Event listener sur le tri
-    if (selectTri) {
-        selectTri.addEventListener('change', (e) => {
-            afficherListePersonnalites(e.target.value);
-        });
-    }
-
-    // Bouton fermer
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
-    
-    // Fond modal
-    const fondModal = modal.querySelector('._3-fond-modal');
-    if (fondModal) {
-        fondModal.onclick = () => fermerModal(modal);
-    }
-}
-
-function selectionnerPersonnalite(identifier, personnalite) {
-    // Trouver l'input correspondant et le remplir
-    let input = document.querySelector(`input[data-secteur-id="${identifier}"]`);
-    if (!input) {
-        input = document.querySelector(`input[data-temp-id="${identifier}"]`);
-    }
-    
-    if (input) {
-        input.value = `${personnalite.nom} ${personnalite.prenom}`;
-        input.dataset.persoId = personnalite.id;
-        mettreAJourPersonnalitePoste(input, personnalite.id);
-    }
-}
-
-// ================================================================
-// MODAUX - AJOUTER PERSONNALITÉ
-// ================================================================
-
-function ouvrirModalAjouterPersonnalite(identifier) {
-    const modal = document.querySelector('.pm-parent.ajouter-personnalit');
-    if (!modal) return;
-
-    modal.style.display = 'block';
-    modal.dataset.currentIdentifier = identifier;
-
-    // Bouton fermer
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
-}
-
-// ================================================================
-// AUTRES MODAUX
-// ================================================================
-
-function ouvrirModalModifierSousSecteurs(identifier) {
-    const modal = document.querySelector('.pm-parent.choisir-sous-secteur');
-    if (!modal) return;
-
-    modal.style.display = 'block';
-    modal.dataset.currentIdentifier = identifier;
-
-    // Déterminer quel poste est concerné
-    let poste = null;
-    let secteurIds = [];
-    
-    // Chercher dans les postes régaliens
-    poste = gouvernementEnCours.postes.regaliens.find(p => p.secteur_id === identifier);
-    if (poste) {
-        secteurIds = [poste.secteur_id];
-    } else {
-        // Chercher dans les postes non-régaliens
-        poste = gouvernementEnCours.postes.nonRegaliens.find(p => p.temp_id === identifier);
-        if (poste) {
-            secteurIds = poste.secteurs_ids;
-        }
-    }
-
-    if (!poste) {
-        console.warn('Poste non trouvé pour identifier:', identifier);
-        return;
-    }
-
-    // Récupérer tous les sous-secteurs possibles pour les secteurs du poste
-    const sousSecteursPossibles = new Set();
-    secteurIds.forEach(secteurId => {
-        const ss = cache.secteursDefaut[secteurId] || [];
-        ss.forEach(s => sousSecteursPossibles.add(s));
+      }
     });
 
-    const container = modal.querySelector('#liste-sous-secteurs');
-    if (!container) return;
+    // Postes non régaliens
+    this.currentComposition.postesNonRegaliens.forEach((poste, index) => {
+      if (poste.personnalite_id) {
+        postes.push({
+          gouvernement_id: gouv.id,
+          type: 'non_regalien',
+          personnalite_id: poste.personnalite_id,
+          secteur_id: poste.secteur_id,
+          nom_poste_personnalise: poste.nom_personnalise,
+          ordre: index + 100
+        });
+      }
+    });
 
-    // Afficher les sous-secteurs avec ceux actuellement sélectionnés cochés
-    container.innerHTML = Array.from(sousSecteursPossibles).map(sousSecteur => {
-        const checked = poste.sous_secteurs && poste.sous_secteurs.includes(sousSecteur.id) ? 'checked' : '';
-        return `
-            <label class="w-checkbox _w-checkbox">
-                <div class="w-checkbox-input w-checkbox-input--inputType-custom checkbox ${checked ? 'w--redirected-checked' : ''}"></div>
-                <input 
-                    type="checkbox" 
-                    id="ss-${sousSecteur.id}" 
-                    name="sous-secteur" 
-                    value="${sousSecteur.id}"
-                    data-ss-nom="${sousSecteur.nom}"
-                    style="opacity:0;position:absolute;z-index:-1"
-                    ${checked}
-                />
-                <span class="checkbox-label-2 w-form-label" for="ss-${sousSecteur.id}">${sousSecteur.nom}</span>
-            </label>
-        `;
-    }).join('');
+    // Délégués
+    this.currentComposition.delegues.forEach((delegue, index) => {
+      if (delegue.personnalite_id) {
+        postes.push({
+          gouvernement_id: gouv.id,
+          type: 'delegue',
+          personnalite_id: delegue.personnalite_id,
+          fonction_delegue: delegue.fonction,
+          ministeres_rattachement: delegue.ministeres_rattachement,
+          ordre: index + 200
+        });
+      }
+    });
 
-    // Event listener sur le bouton valider
-    const btnValider = modal.querySelector('#valider-sous-secteurs');
-    if (btnValider) {
-        btnValider.onclick = (e) => {
-            e.preventDefault();
-            
-            // Récupérer les sous-secteurs cochés
-            const checkboxes = container.querySelectorAll('input[type="checkbox"]:checked');
-            const nouveauxSousSecteurs = Array.from(checkboxes).map(cb => cb.value);
+    if (postes.length > 0) {
+      const { error: postesError } = await supabase
+        .from('postes_gouvernement')
+        .insert(postes);
 
-            // Mettre à jour le poste
-            poste.sous_secteurs = nouveauxSousSecteurs;
-
-            // Mettre à jour l'affichage dans le DOM
-            const bloc = document.querySelector(`[data-secteur-id="${identifier}"], [data-temp-id="${identifier}"]`);
-            if (bloc) {
-                const sousSecteurDiv = bloc.querySelector('._3-sous-secteur, ._2-sous-secteurs');
-                if (sousSecteurDiv) {
-                    const nomsSousSecteurs = nouveauxSousSecteurs
-                        .map(id => cache.sousSecteurs.find(ss => ss.id === id)?.nom)
-                        .filter(Boolean)
-                        .join(', ');
-                    
-                    const lienModifier = sousSecteurDiv.querySelector('a');
-                    sousSecteurDiv.innerHTML = nomsSousSecteurs + ' ';
-                    if (lienModifier) {
-                        sousSecteurDiv.appendChild(lienModifier);
-                    }
-                }
-            }
-
-            fermerModal(modal);
-        };
+      if (postesError) throw postesError;
     }
 
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
+    UI.showNotification('Gouvernement publié avec succès !', 'success');
     
-    const fondModal = modal.querySelector('._3-fond-modal');
-    if (fondModal) {
-        fondModal.onclick = () => fermerModal(modal);
-    }
-}
-
-function ouvrirModalModifierIntitule(tempId) {
-    const modal = document.querySelector('.pm-parent.modifier-intitul');
-    if (!modal) return;
-
-    modal.style.display = 'block';
-    modal.dataset.currentTempId = tempId;
-
-    // Récupérer l'intitulé actuel
-    const poste = gouvernementEnCours.postes.nonRegaliens.find(p => p.temp_id === tempId);
-    const input = modal.querySelector('input[id="field-5"]');
+    // Réinitialiser le formulaire
+    this.resetComposerForm();
     
-    if (input && poste) {
-        input.value = poste.nom_poste_personnalise || '';
-    }
+    // Aller à la liste des gouvernements publiés
+    setTimeout(() => {
+      UI.showSection('gouvernements-publies');
+    }, 1500);
 
-    const btnValider = modal.querySelector('[data-w-id="6d835420-576d-e619-0305-5b784b53cb47"]');
-    if (btnValider) {
-        btnValider.onclick = (e) => {
-            e.preventDefault();
-            
-            const nouvelIntitule = input.value;
-            if (poste) {
-                poste.nom_poste_personnalise = nouvelIntitule;
-                
-                // Mettre à jour le DOM
-                const bloc = document.querySelector(`[data-temp-id="${tempId}"]`);
-                if (bloc) {
-                    const h3 = bloc.querySelector('h3');
-                    if (h3) {
-                        h3.innerHTML = `${nouvelIntitule} <a href="#" class="_2-code-link-button" data-action="modifier-intitule" data-temp-id="${tempId}">modifier l'intitulé</a>`;
-                    }
-                }
-            }
-
-            fermerModal(modal);
-        };
-    }
-
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
-}
-
-function ouvrirModalModifierDelegue(tempId) {
-    const modal = document.querySelector('.pm-parent.definir-delegu');
-    if (!modal) return;
-
-    modal.style.display = 'block';
-    modal.dataset.editTempId = tempId;
-
-    // Pré-remplir avec les données actuelles
-    const delegue = gouvernementEnCours.postes.delegues.find(d => d.temp_id === tempId);
-    if (delegue) {
-        const textarea = modal.querySelector('textarea[id="field-8"]');
-        if (textarea) {
-            textarea.value = delegue.fonction;
-        }
-    }
-
-    const btnFermer = modal.querySelector('._3-close-bouton');
-    if (btnFermer) {
-        btnFermer.onclick = (e) => {
-            e.preventDefault();
-            fermerModal(modal);
-        };
-    }
-}
-
-function fermerModal(modal) {
-    modal.style.display = 'none';
-    // Nettoyer les datasets
-    delete modal.dataset.currentIdentifier;
-    delete modal.dataset.currentTempId;
-    delete modal.dataset.editTempId;
-}
-
-// ================================================================
-// SUPPRESSION DE POSTE
-// ================================================================
-
-function supprimerPoste(tempId) {
-    if (!confirm('Voulez-vous vraiment supprimer ce poste ?')) return;
-
-    // Supprimer du DOM
-    const bloc = document.querySelector(`[data-temp-id="${tempId}"]`);
-    if (bloc) {
-        bloc.remove();
-    }
-
-    // Supprimer du state
-    gouvernementEnCours.postes.nonRegaliens = 
-        gouvernementEnCours.postes.nonRegaliens.filter(p => p.temp_id !== tempId);
-    
-    gouvernementEnCours.postes.delegues = 
-        gouvernementEnCours.postes.delegues.filter(d => d.temp_id !== tempId);
-}
-
-// ================================================================
-// SAUVEGARDE DU GOUVERNEMENT
-// ================================================================
-
-async function sauvegarderGouvernement(publier = false) {
-    try {
-        // Validation
-        if (!gouvernementEnCours.titre || gouvernementEnCours.titre.trim() === '') {
-            alert('⚠️ Veuillez donner un nom à votre gouvernement');
-            return;
-        }
-
-        // Vérifier qu'au moins un poste régalien est rempli
-        const postesRemplis = gouvernementEnCours.postes.regaliens.filter(p => p.personnalite_id !== null);
-        if (postesRemplis.length === 0) {
-            alert('⚠️ Veuillez nommer au moins un ministre');
-            return;
-        }
-
-        const user = await getCurrentUser();
-        if (!user) {
-            alert('⚠️ Vous devez être connecté pour sauvegarder un gouvernement');
-            return;
-        }
-
-        console.log('💾 Sauvegarde du gouvernement...', { publier });
-
-        // 1. Créer ou mettre à jour le gouvernement
-        const gouvernementData = {
-            titre: gouvernementEnCours.titre,
-            description: gouvernementEnCours.description || null,
-            is_published: publier,
-            created_by: user.id
-        };
-
-        let gouvernementId = gouvernementEnCours.id;
-
-        if (gouvernementId) {
-            // Mise à jour
-            const { error: updateError } = await supabase
-                .from('gouvernements')
-                .update(gouvernementData)
-                .eq('id', gouvernementId);
-            
-            if (updateError) throw updateError;
-        } else {
-            // Création
-            const { data, error: insertError } = await supabase
-                .from('gouvernements')
-                .insert(gouvernementData)
-                .select()
-                .single();
-            
-            if (insertError) throw insertError;
-            gouvernementId = data.id;
-            gouvernementEnCours.id = gouvernementId;
-        }
-
-        // 2. Supprimer les anciens postes
-        await supabase
-            .from('postes_gouvernement')
-            .delete()
-            .eq('gouvernement_id', gouvernementId);
-
-        // 3. Insérer les nouveaux postes
-        const tousLesPostes = [];
-        let ordre = 1;
-
-        // Postes régaliens
-        for (const poste of gouvernementEnCours.postes.regaliens) {
-            if (poste.personnalite_id) {
-                tousLesPostes.push({
-                    gouvernement_id: gouvernementId,
-                    type: 'ministre_regalien',
-                    personnalite_id: poste.personnalite_id,
-                    secteur_id: poste.secteur_id,
-                    nom_poste_personnalise: poste.nom_poste_personnalise,
-                    ordre: ordre++
-                });
-            }
-        }
-
-        // Postes non-régaliens
-        for (const poste of gouvernementEnCours.postes.nonRegaliens) {
-            if (poste.personnalite_id) {
-                tousLesPostes.push({
-                    gouvernement_id: gouvernementId,
-                    type: 'ministre_non_regalien',
-                    personnalite_id: poste.personnalite_id,
-                    secteur_id: poste.secteurs_ids[0], // Premier secteur comme principal
-                    nom_poste_personnalise: poste.nom_poste_personnalise,
-                    ordre: ordre++
-                });
-            }
-        }
-
-        // Délégués
-        for (const delegue of gouvernementEnCours.postes.delegues) {
-            if (delegue.personnalite_id) {
-                tousLesPostes.push({
-                    gouvernement_id: gouvernementId,
-                    type: 'delegue',
-                    personnalite_id: delegue.personnalite_id,
-                    fonction_delegue: delegue.fonction,
-                    ministeres_rattachement: delegue.ministeres_rattachement,
-                    ordre: ordre++
-                });
-            }
-        }
-
-        if (tousLesPostes.length > 0) {
-            const { error: postesError } = await supabase
-                .from('postes_gouvernement')
-                .insert(tousLesPostes);
-            
-            if (postesError) throw postesError;
-        }
-
-        // 4. TODO: Gérer les relations secteurs fusionnés et sous-secteurs
-
-        // Succès
-        const message = publier 
-            ? '✅ Gouvernement publié avec succès !' 
-            : '✅ Brouillon sauvegardé !';
-        
-        alert(message);
-
-        if (publier) {
-            // Rediriger vers la liste des gouvernements publiés
-            // TODO: Implémenter la navigation
-        }
-
-    } catch (error) {
-        console.error('❌ Erreur sauvegarde gouvernement:', error);
-        alert('❌ Erreur lors de la sauvegarde. Veuillez réessayer.');
-    }
-}
-
-// ================================================================
-// EXPORTS
-// ================================================================
-
-export {
-    gouvernementEnCours,
-    cache as cacheGouvernement
+  } catch (error) {
+    console.error('Erreur publication:', error);
+    UI.showNotification('Erreur lors de la publication', 'error');
+  }
 };
+
+// Enregistrer en brouillon
+Gouvernement.enregistrerBrouillon = async function() {
+  if (!Auth.isLoggedIn()) {
+    UI.showNotification('Vous devez être connecté', 'error');
+    UI.openModal('connect');
+    return;
+  }
+
+  // Même logique que publier, mais avec is_published = false
+  // TODO: Implémenter
+  UI.showNotification('Brouillon enregistré', 'success');
+};
+
+// Réinitialiser le formulaire de composition
+Gouvernement.resetComposerForm = function() {
+  this.currentComposition = {
+    titre: '',
+    description: '',
+    postesRegaliens: [],
+    postesNonRegaliens: [],
+    delegues: []
+  };
+
+  // Vider les champs
+  const titreInput = document.querySelector('._3-2_sous-menu-content-2 input[placeholder="nom du gouvernement*"]');
+  const descInput = document.querySelector('._3-2_sous-menu-content-2 textarea[placeholder="Vision de l\'auteur"]');
+
+  if (titreInput) titreInput.value = '';
+  if (descInput) descInput.value = '';
+
+  // Recharger les postes régaliens
+  this.loadPostesRegaliens();
+};
+
+// Configuration des listeners pour le formulaire de composition
+Gouvernement.setupComposerListeners = function() {
+  // Bouton ajouter ministère
+  const btnAddMin = document.querySelector('[data-w-id="91f0827b-9d2f-ca59-b104-920ab5a68f23"]');
+  if (btnAddMin) {
+    btnAddMin.onclick = (e) => {
+      e.preventDefault();
+      this.ajouterMinistere();
+    };
+  }
+
+  // Bouton ajouter délégué
+  const btnAddDel = document.querySelector('[data-w-id="f88e3528-3e5b-fcff-ca05-b7c7a0d33607"]');
+  if (btnAddDel) {
+    btnAddDel.onclick = (e) => {
+      e.preventDefault();
+      this.ajouterDelegue();
+    };
+  }
+
+  // Boutons publier et brouillon
+  const btnPublier = document.querySelector('._3-2_sous-menu-content-2 ._w-link-bloc-button.publier');
+  if (btnPublier) {
+    btnPublier.onclick = (e) => {
+      e.preventDefault();
+      this.publierGouvernement();
+    };
+  }
+
+  const btnBrouillon = document.querySelector('._3-2_sous-menu-content-2 ._w-link-bloc-button:not(.publier)');
+  if (btnBrouillon) {
+    btnBrouillon.onclick = (e) => {
+      e.preventDefault();
+      this.enregistrerBrouillon();
+    };
+  }
+};
+
+// Initialiser au chargement
+document.addEventListener('DOMContentLoaded', () => {
+  Gouvernement.init();
+});

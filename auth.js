@@ -1,239 +1,202 @@
-// Configuration Supabase
-const SUPABASE_URL = 'https://lbcmwivxvzeortvftxsi.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxiY213aXZ4dnplb3J0dmZ0eHNpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI0Mzc2MTgsImV4cCI6MjA3ODAxMzYxOH0.RN431cCTPF2D_1xH8HJX7Eey-s4STlU3F-ZZ8sxoE7I';
+// ============================================
+// SOSGOUV - Gestion de l'authentification
+// ============================================
 
-// Initialiser le client Supabase
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const Auth = {
+  currentUser: null,
 
-// Fonction de connexion
-async function login(username, password) {
-    try {
-        const { data, error } = await supabase
-            .from('users')
-            .select('*')
-            .eq('username', username)
-            .single();
-
-        if (error || !data) {
-            return { success: false, message: 'Nom d\'utilisateur ou mot de passe incorrect' };
-        }
-
-        if (password === '123456') {
-            const userSession = {
-                id: data.id,
-                username: data.username,
-                isAdmin: data.is_admin,
-                nom: data.nom || '',
-                prenom: data.prenom || '',
-                email: data.email || '',
-                loginTime: new Date().toISOString()
-            };
-            
-            localStorage.setItem('userSession', JSON.stringify(userSession));
-            return { success: true, user: userSession };
-        } else {
-            return { success: false, message: 'Nom d\'utilisateur ou mot de passe incorrect' };
-        }
-    } catch (err) {
-        console.error('Erreur de connexion:', err);
-        return { success: false, message: 'Erreur de connexion' };
+  // Initialiser l'authentification
+  async init() {
+    // Vérifier si un utilisateur est connecté (stocké en localStorage)
+    const storedUser = localStorage.getItem('sosgouv_user');
+    if (storedUser) {
+      this.currentUser = JSON.parse(storedUser);
+      this.updateUIForLoggedInUser();
     }
-}
+  },
 
-// Fonction d'inscription
-async function signup(username, password) {
+  // Connexion
+  async login(username, password) {
     try {
-        const passwordHash = '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
-        
-        const { data, error } = await supabase
-            .from('users')
-            .insert([{ username: username, password_hash: passwordHash, is_admin: false }])
-            .select()
-            .single();
+      // Récupérer l'utilisateur depuis la table users
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('username', username)
+        .single();
 
-        if (error) {
-            if (error.code === '23505') return { success: false, message: 'Ce nom d\'utilisateur existe déjà' };
-            return { success: false, message: 'Erreur lors de l\'inscription' };
-        }
+      if (error || !data) {
+        throw new Error('Nom d\'utilisateur ou mot de passe incorrect');
+      }
 
-        const userSession = {
-            id: data.id,
-            username: data.username,
-            isAdmin: data.is_admin,
-            nom: data.nom || '',
-            prenom: data.prenom || '',
-            email: data.email || '',
-            loginTime: new Date().toISOString()
-        };
-        
-        localStorage.setItem('userSession', JSON.stringify(userSession));
-        return { success: true, user: userSession };
-    } catch (err) {
-        return { success: false, message: 'Erreur lors de l\'inscription' };
+      // Vérifier le mot de passe (simple comparaison - à améliorer avec hash)
+      if (data.password_hash !== password) {
+        throw new Error('Nom d\'utilisateur ou mot de passe incorrect');
+      }
+
+      // Stocker l'utilisateur connecté
+      this.currentUser = data;
+      localStorage.setItem('sosgouv_user', JSON.stringify(data));
+      
+      this.updateUIForLoggedInUser();
+      UI.closeModal('connect');
+      UI.showNotification('Connexion réussie !', 'success');
+
+      return { success: true };
+    } catch (error) {
+      console.error('Erreur de connexion:', error);
+      return { success: false, error: error.message };
     }
-}
+  },
 
-// Déconnexion
-function logout() {
-    localStorage.removeItem('userSession');
-    updateUIForLoggedOutUser();
-    location.reload();
-}
+  // Créer un compte
+  async signup(username, password, email = null) {
+    try {
+      // Vérifier si le username existe déjà
+      const { data: existing } = await supabase
+        .from('users')
+        .select('id')
+        .eq('username', username)
+        .single();
 
-// Vérifier connexion
-function isLoggedIn() {
-    return localStorage.getItem('userSession') !== null;
-}
+      if (existing) {
+        throw new Error('Ce nom d\'utilisateur existe déjà');
+      }
 
-// Récupérer session
-function getUserSession() {
-    const session = localStorage.getItem('userSession');
-    return session ? JSON.parse(session) : null;
-}
+      // Créer le nouvel utilisateur
+      const { data, error } = await supabase
+        .from('users')
+        .insert([
+          {
+            username: username,
+            password_hash: password, // À améliorer avec un vrai hash
+            email: email,
+            is_admin: false
+          }
+        ])
+        .select()
+        .single();
 
-// UI utilisateur connecté
-function updateUIForLoggedInUser(user) {
+      if (error) throw error;
+
+      // Connecter automatiquement l'utilisateur
+      this.currentUser = data;
+      localStorage.setItem('sosgouv_user', JSON.stringify(data));
+      
+      this.updateUIForLoggedInUser();
+      UI.closeModal('connect');
+      UI.showNotification('Compte créé avec succès !', 'success');
+
+      return { success: true };
+    } catch (error) {
+      console.error('Erreur de création de compte:', error);
+      return { success: false, error: error.message };
+    }
+  },
+
+  // Déconnexion
+  logout() {
+    this.currentUser = null;
+    localStorage.removeItem('sosgouv_user');
+    this.updateUIForLoggedOut();
+    UI.showNotification('Déconnexion réussie', 'success');
+    // Retour à la page d'accueil
+    UI.showSection('a-propos');
+  },
+
+  // Vérifier si l'utilisateur est admin
+  isAdmin() {
+    return this.currentUser && this.currentUser.is_admin;
+  },
+
+  // Vérifier si l'utilisateur est connecté
+  isLoggedIn() {
+    return this.currentUser !== null;
+  },
+
+  // Mettre à jour l'UI quand l'utilisateur est connecté
+  updateUIForLoggedInUser() {
+    const user = this.currentUser;
+    
+    // Afficher le nom d'utilisateur dans le header
     const usernameDisplay = document.querySelector('.connected-username');
     if (usernameDisplay) {
-        usernameDisplay.textContent = user.username;
-        usernameDisplay.style.display = 'block';
+      usernameDisplay.textContent = user.username;
+      usernameDisplay.style.display = 'block';
     }
 
-    const adminPart = document.querySelector('.admine-part');
-    if (adminPart) adminPart.style.display = user.isAdmin ? 'flex' : 'none';
-
-    const infoPersoForm = document.querySelector('form[id="email-form-16"]');
-    if (infoPersoForm) {
-        const inputs = infoPersoForm.querySelectorAll('input[type="text"]');
-        if (inputs.length >= 5) {
-            inputs[0].value = user.username;
-            inputs[1].value = '••••••••';
-            inputs[2].value = user.nom || '';
-            inputs[3].value = user.prenom || '';
-            inputs[4].value = user.email || '';
-        }
+    // Changer "me connecter" en "me déconnecter"
+    const loginLink = document.querySelector('[data-w-id="c7b424b0-8e01-36ef-981e-7b7a15c21b64"]');
+    if (loginLink) {
+      loginLink.textContent = 'me déconnecter';
+      loginLink.onclick = (e) => {
+        e.preventDefault();
+        this.logout();
+      };
     }
 
-    const connectLink = document.querySelector('.menu-link[data-w-id="b9597464-fc2b-b33e-b4cb-35073abd0985"]');
-    if (connectLink) {
-        connectLink.textContent = 'me déconnecter';
-        connectLink.onclick = (e) => { e.preventDefault(); logout(); };
+    // Afficher le div admin si l'utilisateur est admin
+    if (this.isAdmin()) {
+      const adminDiv = document.querySelector('.admine-part');
+      if (adminDiv) {
+        adminDiv.style.display = 'block';
+      }
     }
-}
+  },
 
-// UI utilisateur déconnecté
-function updateUIForLoggedOutUser() {
+  // Mettre à jour l'UI quand l'utilisateur est déconnecté
+  updateUIForLoggedOut() {
+    // Masquer le nom d'utilisateur
     const usernameDisplay = document.querySelector('.connected-username');
-    if (usernameDisplay) usernameDisplay.style.display = 'none';
-
-    const adminPart = document.querySelector('.admine-part');
-    if (adminPart) adminPart.style.display = 'none';
-
-    const connectLink = document.querySelector('.menu-link[data-w-id="b9597464-fc2b-b33e-b4cb-35073abd0985"]');
-    if (connectLink) {
-        connectLink.textContent = 'me connecter';
-        connectLink.onclick = null;
-    }
-}
-
-// Initialisation
-document.addEventListener('DOMContentLoaded', function() {
-    if (isLoggedIn()) {
-        updateUIForLoggedInUser(getUserSession());
-    } else {
-        updateUIForLoggedOutUser();
+    if (usernameDisplay) {
+      usernameDisplay.style.display = 'none';
     }
 
-    // Formulaire connexion
-    const loginForm = document.querySelector('form[id="login-form"]');
-    if (loginForm) {
-        loginForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const result = await login(
-                document.getElementById('login-username').value,
-                document.getElementById('login-password').value
-            );
-            
-            if (result.success) {
-                document.querySelector('.cont-flex').style.display = 'none';
-                document.querySelector('._3-fond-modal').style.display = 'none';
-                location.reload();
-            } else {
-                alert(result.message);
-            }
-        });
+    // Remettre "me connecter"
+    const loginLink = document.querySelector('[data-w-id="c7b424b0-8e01-36ef-981e-7b7a15c21b64"]');
+    if (loginLink) {
+      loginLink.textContent = 'me connecter';
+      loginLink.onclick = (e) => {
+        e.preventDefault();
+        UI.openModal('connect');
+      };
     }
 
-    // Formulaire inscription
-    const signupForm = document.querySelector('form[id="signup-form"]');
-    if (signupForm) {
-        signupForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const password = document.getElementById('signup-password').value;
-            const passwordConfirm = document.getElementById('signup-password-confirm').value;
+    // Masquer le div admin
+    const adminDiv = document.querySelector('.admine-part');
+    if (adminDiv) {
+      adminDiv.style.display = 'none';
+    }
+  },
 
-            if (password !== passwordConfirm) {
-                alert('Les mots de passe ne correspondent pas');
-                return;
-            }
+  // Mettre à jour le profil utilisateur
+  async updateProfile(updates) {
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .update(updates)
+        .eq('id', this.currentUser.id)
+        .select()
+        .single();
 
-            const result = await signup(document.getElementById('signup-username').value, password);
-            
-            if (result.success) {
-                document.querySelector('.cont-flex').style.display = 'none';
-                document.querySelector('._3-fond-modal').style.display = 'none';
-                location.reload();
-            } else {
-                alert(result.message);
-            }
-        });
+      if (error) throw error;
+
+      // Mettre à jour l'utilisateur courant
+      this.currentUser = { ...this.currentUser, ...data };
+      localStorage.setItem('sosgouv_user', JSON.stringify(this.currentUser));
+      
+      this.updateUIForLoggedInUser();
+      UI.showNotification('Profil mis à jour !', 'success');
+
+      return { success: true };
+    } catch (error) {
+      console.error('Erreur de mise à jour du profil:', error);
+      return { success: false, error: error.message };
     }
-    
-    // Bouton changer de compte
-    const changerCompteBtn = document.querySelector('[data-w-id="b9597464-fc2b-b33e-b4cb-35073abd0c4d"]');
-    if (changerCompteBtn) {
-        changerCompteBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            localStorage.removeItem('userSession');
-            document.querySelector('._4-page-modal').style.display = 'none';
-            document.querySelector('._3-fond-modal-pages').style.display = 'none';
-            document.querySelector('.cont-flex').style.display = 'flex';
-            document.querySelector('._3-fond-modal').style.display = 'block';
-            updateUIForLoggedOutUser();
-        });
-    }
-    
-    // Enregistrer infos personnelles
-    const saveInfoBtn = document.querySelector('[data-w-id="b9597464-fc2b-b33e-b4cb-35073abd0c65"]');
-    if (saveInfoBtn) {
-        saveInfoBtn.addEventListener('click', async (e) => {
-            e.preventDefault();
-            const user = getUserSession();
-            if (!user) return alert('Vous devez être connecté');
-            
-            const inputs = document.querySelectorAll('form[id="email-form-16"] input[type="text"]');
-            
-            try {
-                const { data, error } = await supabase
-                    .from('users')
-                    .update({
-                        username: inputs[0].value,
-                        nom: inputs[2].value || '',
-                        prenom: inputs[3].value || '',
-                        email: inputs[4].value || ''
-                    })
-                    .eq('id', user.id)
-                    .select()
-                    .single();
-                
-                if (error) return alert('Erreur : ' + error.message);
-                
-                localStorage.setItem('userSession', JSON.stringify({...user, ...data}));
-                document.querySelector('.success-message-2').style.display = 'block';
-                setTimeout(() => document.querySelector('.success-message-2').style.display = 'none', 3000);
-            } catch (err) {
-                alert('Erreur lors de la sauvegarde');
-            }
-        });
-    }
+  }
+};
+
+// Initialiser l'authentification au chargement de la page
+document.addEventListener('DOMContentLoaded', () => {
+  Auth.init();
 });
